@@ -1,0 +1,205 @@
+# =====================================
+# ROL: NGINX EXTRA
+# Descripción: Agrega rate limiting, gzip y headers de seguridad, incluyendo
+# CSP, y corrige el ruteo que la plantilla del kit no genera bien, todo sobre
+# el server block generado por el rol nginx, sin modificar sus templates.
+# Espejo de infra/deploy/minimal/lifesyncgames.conf, la VPS.
+# Solo toca /etc/nginx/sites-available/{{ project_name }}.conf, el archivo
+# propio de este proyecto en la VM compartida de DIINF.
+#
+# Si algun insertafter no encuentra su ancla, por ejemplo si cambiaron los
+# prefijos en services del playbook, blockinfile inserta al final del
+# archivo en vez de fallar. Por eso el nginx -t al final es el chequeo real
+# de que todo quedo bien insertado.
+# =====================================
+
+# Zonas de rate limiting. Contexto http, deben ir fuera de cualquier server.
+# Mismos nombres y limites que la VPS, prefijados lsg_diinf para no chocar
+# con zonas de otros tenants en la misma VM compartida.
+- name: Insertar zonas de rate limiting al inicio del archivo
+  blockinfile:
+    path: "/etc/nginx/sites-available/{{ project_name | default('app') }}.conf"
+    marker: "# {mark} ANSIBLE MANAGED BLOCK, lsg diinf rate limit zones"
+    insertbefore: BOF
+    block: |
+      limit_req_zone $binary_remote_addr zone=lsg_diinf_auth_limit:10m rate=5r/s;
+      limit_req_zone $binary_remote_addr zone=lsg_diinf_api_limit:10m rate=20r/s;
+      limit_req_zone $binary_remote_addr zone=lsg_diinf_general_limit:10m rate=30r/s;
+      limit_req_status 429;
+  become: true
+  notify: Reiniciar Nginx
+
+# Headers de seguridad, copia de infra/dev/nginx/security-headers.conf, mas
+# gzip, client_max_body_size y error page 429, dentro del server block
+# HTTPS. Ancla: linea unica que solo aparece ahi, generada por nginx_config.j2.
+# HSTS se agrega aca. La VPS no lo trae porque Tailscale Funnel termina TLS
+# antes de nginx, en DIINF nginx si termina TLS con Let's Encrypt.
+- name: Insertar headers de seguridad, CSP, gzip y error page 429 en el server block HTTPS
+  blockinfile:
+    path: "/etc/nginx/sites-available/{{ project_name | default('app') }}.conf"
+    marker: "    # {mark} ANSIBLE MANAGED BLOCK, lsg diinf headers, csp, gzip"
+    insertafter: "ssl_ciphers 'EECDH\\+AESGCM:EDH\\+AESGCM:AES256\\+EECDH:AES256\\+EDH';"
+    block: |
+      add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+      add_header X-Frame-Options "SAMEORIGIN" always;
+      add_header X-Content-Type-Options "nosniff" always;
+      add_header X-XSS-Protection "1; mode=block" always;
+      add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+      add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+      add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-eval' 'sha256-3bzWVxQE32IZQKH9eh8KzyHuhXOlMrboDVVBRd0fWTU=' https://apis.google.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: https:; connect-src 'self' https://*.googleapis.com https://apis.google.com https://*.firebaseapp.com https://api.interaction-lab.info; font-src 'self' data: https://fonts.gstatic.com; frame-src https://*.firebaseapp.com https://accounts.google.com https://apis.google.com; object-src 'none'; base-uri 'self'; form-action 'self';" always;
+
+      client_max_body_size 10m;
+
+      gzip on;
+      gzip_comp_level 6;
+      gzip_proxied any;
+      gzip_vary on;
+      gzip_min_length 256;
+      gzip_types text/css application/javascript application/json image/svg+xml text/plain application/xml;
+
+      error_page 429 = @rate_limited;
+      location @rate_limited {
+          default_type application/json;
+          return 429 '{"error": "Too Many Requests"}';
+      }
+  become: true
+  notify: Reiniciar Nginx
+
+# Correcciones de ruteo. La plantilla del kit hardcodea la barra final en el
+# proxy_pass de todo frontend, lo que hace que nginx elimine el prefijo antes
+# de pasar al contenedor. Vitrina no lo tolera: su Dockerfile copia el dist a
+# ./vitrina y su base de Vite es /vitrina/, asi que necesita el prefijo intacto.
+# Difusion y cloud copian el dist a la raiz, ahi la barra si corresponde.
+# Sin esto el contenedor de vitrina responde index.html a las peticiones de
+# assets, con 200 y content-type text/html, y el SPA queda en blanco.
+# Idempotente por construccion: en la segunda corrida ya no hay barra que sacar.
+- name: Conservar el prefijo en frontends que sirven bajo subdirectorio
+  replace:
+    path: "/etc/nginx/sites-available/{{ project_name | default('app') }}.conf"
+    regexp: 'proxy_pass http://localhost:{{ item.port }}/;'
+    replace: 'proxy_pass http://localhost:{{ item.port }};'
+  loop: "{{ services | selectattr('frontend_prefix', 'defined')
+                     | selectattr('frontend_prefix', 'in', nginx_preserve_prefix | default([])) | list }}"
+  loop_control:
+    label: "{{ item.name }}"
+  become: true
+  notify: Reiniciar Nginx
+
+# La plantilla solo genera un location / si algun servicio declara
+# frontend_prefix "/", y ninguno lo hace, asi que la raiz del dominio queda sin
+# atender. Misma ancla que el bloque de headers; el marcador distinto permite
+# que convivan y el orden entre ambos no le importa a nginx.
+- name: Insertar location / por defecto
+  blockinfile:
+    path: "/etc/nginx/sites-available/{{ project_name | default('app') }}.conf"
+    marker: "    # {mark} ANSIBLE MANAGED BLOCK, lsg diinf default location"
+    insertafter: "ssl_ciphers 'EECDH\\+AESGCM:EDH\\+AESGCM:AES256\\+EECDH:AES256\\+EDH';"
+    block: |
+      location / {
+          add_header Cache-Control "no-store";
+          return 302 $scheme://$host{{ nginx_default_redirect | default('/home/') }};
+      }
+  become: true
+  notify: Reiniciar Nginx
+
+# limit_req por location, mismos bursts que la VPS. Ancla: la linea de
+# apertura de cada location, generada por el loop de services en nginx_config.j2.
+- name: "limit_req en /home/ (difusion, frontend_prefix: home)"
+  blockinfile:
+    path: "/etc/nginx/sites-available/{{ project_name | default('app') }}.conf"
+    marker: "        # {mark} ANSIBLE MANAGED BLOCK, lsg diinf limit_req home"
+    insertafter: "location /home/ \\{"
+    block: |
+      limit_req zone=lsg_diinf_general_limit burst=60 nodelay;
+  become: true
+  notify: Reiniciar Nginx
+
+- name: "limit_req en /vitrina/ (vitrina frontend, frontend_prefix: vitrina)"
+  blockinfile:
+    path: "/etc/nginx/sites-available/{{ project_name | default('app') }}.conf"
+    marker: "        # {mark} ANSIBLE MANAGED BLOCK, lsg diinf limit_req vitrina frontend"
+    insertafter: "location /vitrina/ \\{"
+    block: |
+      limit_req zone=lsg_diinf_general_limit burst=60 nodelay;
+  become: true
+  notify: Reiniciar Nginx
+
+- name: "limit_req en /vitrina/api/ (vitrina api, api_prefix: vitrina/api)"
+  blockinfile:
+    path: "/etc/nginx/sites-available/{{ project_name | default('app') }}.conf"
+    marker: "        # {mark} ANSIBLE MANAGED BLOCK, lsg diinf limit_req vitrina api"
+    insertafter: "location /vitrina/api/ \\{"
+    block: |
+      limit_req zone=lsg_diinf_api_limit burst=40 nodelay;
+  become: true
+  notify: Reiniciar Nginx
+
+- name: "limit_req en /auth/ (auth nest, api_prefix: auth)"
+  blockinfile:
+    path: "/etc/nginx/sites-available/{{ project_name | default('app') }}.conf"
+    marker: "        # {mark} ANSIBLE MANAGED BLOCK, lsg diinf limit_req auth"
+    insertafter: "location /auth/ \\{"
+    block: |
+      limit_req zone=lsg_diinf_auth_limit burst=10 nodelay;
+  become: true
+  notify: Reiniciar Nginx
+
+- name: "limit_req en /cloud/ (cloud website, frontend_prefix: cloud)"
+  blockinfile:
+    path: "/etc/nginx/sites-available/{{ project_name | default('app') }}.conf"
+    marker: "        # {mark} ANSIBLE MANAGED BLOCK, lsg diinf limit_req cloud frontend"
+    insertafter: "location /cloud/ \\{"
+    block: |
+      limit_req zone=lsg_diinf_general_limit burst=60 nodelay;
+  become: true
+  notify: Reiniciar Nginx
+
+- name: "limit_req en /cloud/api/get/ (cloud api-get, api_prefix: cloud/api/get)"
+  blockinfile:
+    path: "/etc/nginx/sites-available/{{ project_name | default('app') }}.conf"
+    marker: "        # {mark} ANSIBLE MANAGED BLOCK, lsg diinf limit_req cloud api get"
+    insertafter: "location /cloud/api/get/ \\{"
+    block: |
+      limit_req zone=lsg_diinf_api_limit burst=40 nodelay;
+  become: true
+  notify: Reiniciar Nginx
+
+- name: "limit_req en /cloud/api/post/ (cloud api-post, api_prefix: cloud/api/post)"
+  blockinfile:
+    path: "/etc/nginx/sites-available/{{ project_name | default('app') }}.conf"
+    marker: "        # {mark} ANSIBLE MANAGED BLOCK, lsg diinf limit_req cloud api post"
+    insertafter: "location /cloud/api/post/ \\{"
+    block: |
+      limit_req zone=lsg_diinf_api_limit burst=40 nodelay;
+  become: true
+  notify: Reiniciar Nginx
+
+- name: "limit_req en /cloud/api/attributes/ (cloud attributes, api_prefix: cloud/api/attributes)"
+  blockinfile:
+    path: "/etc/nginx/sites-available/{{ project_name | default('app') }}.conf"
+    marker: "        # {mark} ANSIBLE MANAGED BLOCK, lsg diinf limit_req cloud api attributes"
+    insertafter: "location /cloud/api/attributes/ \\{"
+    block: |
+      limit_req zone=lsg_diinf_api_limit burst=40 nodelay;
+  become: true
+  notify: Reiniciar Nginx
+
+- name: "limit_req en /cloud/api/users/ (cloud user-mgmt, api_prefix: cloud/api/users)"
+  blockinfile:
+    path: "/etc/nginx/sites-available/{{ project_name | default('app') }}.conf"
+    marker: "        # {mark} ANSIBLE MANAGED BLOCK, lsg diinf limit_req cloud api users"
+    insertafter: "location /cloud/api/users/ \\{"
+    block: |
+      limit_req zone=lsg_diinf_api_limit burst=40 nodelay;
+  become: true
+  notify: Reiniciar Nginx
+
+# Verificar la configuración tras el patch. Red de seguridad real: si algún
+# insertafter de arriba no encontró su ancla y el bloque cayó al final del
+# archivo en vez de dentro del server, esto falla y el playbook se detiene.
+- name: Verificar configuración de Nginx tras nginx_extra
+  command: nginx -t
+  register: nginx_extra_test
+  changed_when: false
+  failed_when: nginx_extra_test.rc != 0
+  become: true

@@ -1,0 +1,32 @@
+[submodule "services/difusion"]
+	path = services/difusion
+	url = https://github.com/BlendedGames-bGames/lsg-difusion.git
+[submodule "services/auth"]
+	path = services/auth
+	url = https://github.com/BlendedGames-bGames/lsg-auth-nest.git
+[submodule "services/vitrina-api"]
+	path = services/vitrina-api
+	url = https://github.com/BlendedGames-bGames/lsg-vitrina-api.git
+[submodule "services/vitrina-frontend"]
+	path = services/vitrina-frontend
+	url = https://github.com/BlendedGames-bGames/lsg-vitrina-frontend.git
+[submodule "services/cloud/website"]
+	path = services/cloud/website
+	url = https://github.com/BlendedGames-bGames/lsg-cloud-mod.git
+	branch = website
+[submodule "services/cloud/api-get"]
+	path = services/cloud/api-get
+	url = https://github.com/BlendedGames-bGames/lsg-cloud-mod.git
+	branch = api-get
+[submodule "services/cloud/api-post"]
+	path = services/cloud/api-post
+	url = https://github.com/BlendedGames-bGames/lsg-cloud-mod.git
+	branch = api-post
+[submodule "services/cloud/attributes"]
+	path = services/cloud/attributes
+	url = https://github.com/BlendedGames-bGames/lsg-cloud-mod.git
+	branch = attributes
+[submodule "services/cloud/user-mgmt"]
+	path = services/cloud/user-mgmt
+	url = https://github.com/BlendedGames-bGames/lsg-cloud-mod.git
+	branch = user-mgmt

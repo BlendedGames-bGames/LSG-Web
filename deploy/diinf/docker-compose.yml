@@ -1,0 +1,270 @@
+# LifeSync-Games Platform
+# MongoDB is external (Atlas free cluster), no DB container needed.
+# Exception: the Cloud Module uses a local MySQL 8 container (cloud-mysql below).
+
+services:
+  # Auth Service — NestJS (port 3000)
+  auth-service:
+    image: lsg93080/auth-nest:latest
+    container_name: vitrina-auth-nest
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      MONGODB_URI: ${MONGODB_URI}
+      VITRINA_API_URL: http://vitrina-api:3020/v1
+      GITLAB_CALLBACK_URL: ${BASE_URL}/auth/api/v1/oauth/gitlab/callback
+      GITHUB_CALLBACK_URL: ${BASE_URL}/auth/api/v1/oauth/github/callback
+      CORS_ORIGINS: ${BASE_URL}
+      ALLOWED_REDIRECT_ORIGINS: ${BASE_URL}
+    ports:
+      - "3021:3000"
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: "0.25"
+    networks:
+      - vitrina-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  # Vitrina API — NestJS (port 3020)
+  vitrina-api:
+    image: lsg93080/vitrina-api:latest
+    container_name: vitrina-api
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: 3020
+      MONGODB_URI: ${MONGODB_URI}
+      AUTH_SERVICE_URL: http://auth-service:3000/api/v1
+      VITRINA_BASE_URL: ${BASE_URL}/vitrina
+      CORS_ORIGINS: ${BASE_URL}
+    ports:
+      - "3020:3020"
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: "0.25"
+    networks:
+      - vitrina-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  # Vitrina Frontend — Vue 3 SPA (port 3007)
+  vitrina-frontend:
+    image: lsg93080/vitrina-frontend:latest
+    container_name: vitrina-frontend
+    ports:
+      - "3007:3007"
+    restart: unless-stopped
+    mem_limit: 64m
+    cpus: "0.1"
+    networks:
+      - vitrina-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "2m"
+        max-file: "2"
+
+  # Difusión — Vue 3 landing page (port 3030)
+  difusion:
+    image: lsg93080/difusion:latest
+    container_name: vitrina-difusion
+    ports:
+      - "3030:3030"
+    restart: unless-stopped
+    mem_limit: 64m
+    cpus: "0.1"
+    networks:
+      - vitrina-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "2m"
+        max-file: "2"
+
+  # --- Cloud Module ---
+  # MySQL 8 — local DB, bound to localhost only (no other service here has a
+  # local DB container; the other 4 use MongoDB Atlas, external/managed).
+  cloud-mysql:
+    image: mysql:8.0
+    container_name: vitrina-cloud-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${CLOUD_MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${CLOUD_MYSQL_DATABASE:-bgames}
+    ports:
+      - "127.0.0.1:3307:3306"
+    volumes:
+      - ./cloud/db-init:/docker-entrypoint-initdb.d
+      - ./cloud/db-config/my.cnf:/etc/mysql/conf.d/custom.cnf:ro
+      - cloud-mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: "0.25"
+    networks:
+      - vitrina-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  # Cloud Module — S01: API GET Service (port 3041)
+  cloud-api-get:
+    image: lsg93080/cloud-api-get:latest
+    container_name: vitrina-cloud-api-get
+    env_file:
+      - .env
+    environment:
+      PORT: 3041
+      JWT_SECRET: ${JWT_SECRET}
+      DB_HOST: cloud-mysql
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASSWORD: ${CLOUD_MYSQL_ROOT_PASSWORD}
+      DB_DATABASE: ${CLOUD_MYSQL_DATABASE:-bgames}
+    ports:
+      - "3041:3041"
+    depends_on:
+      cloud-mysql:
+        condition: service_healthy
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: "0.25"
+    networks:
+      - vitrina-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  # Cloud Module — S02: API POST Service (port 3042)
+  cloud-api-post:
+    image: lsg93080/cloud-api-post:latest
+    container_name: vitrina-cloud-api-post
+    env_file:
+      - .env
+    environment:
+      PORT: 3042
+      JWT_SECRET: ${JWT_SECRET}
+      DB_HOST: cloud-mysql
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASSWORD: ${CLOUD_MYSQL_ROOT_PASSWORD}
+      DB_DATABASE: ${CLOUD_MYSQL_DATABASE:-bgames}
+    ports:
+      - "3042:3042"
+    depends_on:
+      cloud-mysql:
+        condition: service_healthy
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: "0.25"
+    networks:
+      - vitrina-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  # Cloud Module — S10: Standard Attributes Service (port 3043)
+  cloud-attributes:
+    image: lsg93080/cloud-attributes:latest
+    container_name: vitrina-cloud-attributes
+    env_file:
+      - .env
+    environment:
+      PORT: 3043
+      JWT_SECRET: ${JWT_SECRET}
+      DB_HOST: cloud-mysql
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASSWORD: ${CLOUD_MYSQL_ROOT_PASSWORD}
+      DB_DATABASE: ${CLOUD_MYSQL_DATABASE:-bgames}
+    ports:
+      - "3043:3043"
+    depends_on:
+      cloud-mysql:
+        condition: service_healthy
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: "0.25"
+    networks:
+      - vitrina-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  # Cloud Module — S11: User Management Service, SSO Bridge (port 3044)
+  cloud-user-mgmt:
+    image: lsg93080/cloud-user-mgmt:latest
+    container_name: vitrina-cloud-user-mgmt
+    env_file:
+      - .env
+    environment:
+      PORT: 3044
+      JWT_SECRET: ${JWT_SECRET}
+      DB_HOST: cloud-mysql
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASSWORD: ${CLOUD_MYSQL_ROOT_PASSWORD}
+      DB_DATABASE: ${CLOUD_MYSQL_DATABASE:-bgames}
+    ports:
+      - "3044:3044"
+    depends_on:
+      cloud-mysql:
+        condition: service_healthy
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: "0.25"
+    networks:
+      - vitrina-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  # Cloud Module — website, Vue 3 SPA (port 3040)
+  # Static build, no runtime env — all VITE_* config is baked in at build
+  # time (that happens in the future CI pipeline for this service, not here).
+  cloud-website:
+    image: lsg93080/cloud-website:latest
+    container_name: vitrina-cloud-website
+    ports:
+      - "3040:8081"
+    restart: unless-stopped
+    mem_limit: 64m
+    cpus: "0.1"
+    networks:
+      - vitrina-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "2m"
+        max-file: "2"
+
+networks:
+  vitrina-net:
+    name: vitrina-net
+
+volumes:
+  cloud-mysql-data:

@@ -1,0 +1,15 @@
+# Secrets / environment
+.env
+.env.*
+!.env.example
+**/firebaseServiceAccountKey.json
+*.key
+*.pem
+
+# Node / build artifacts
+**/node_modules/
+**/dist/
+
+# OS / editor
+.DS_Store
+*.swp
